@@ -5,41 +5,45 @@ from psycopg2 import sql
 import bcrypt
 import json
 import os
-import streamlit as st
+import streamlit as st 
+import pandas as pd # load_user_data için gerekli
 
-# --- PostgreSQL BAĞLANTI BİLGİLERİ (Ortam Değişkenlerinden Okuma) ---
-# Streamlit Cloud'da ortam değişkenlerini (Secrets) kullanın. 
-# Yerel test için varsayılan değerleri kullanır.
+# --- PostgreSQL BAĞLANTI BİLGİLERİ ---
+# Bu değerler, Streamlit Cloud'un 'Secrets' (Sırlar) bölümünden okunur.
+# Eğer okunamazsa (yani secrets doğru ayarlanmazsa), "localhost" varsayılır ve hata verir.
+# Bu hatayı almanız, secrets'ın okunmadığı anlamına gelir.
 DB_HOST = os.environ.get("DB_HOST", "localhost") 
-DB_NAME = os.environ.get("DB_NAME", "finans_db") 
+DB_NAME = os.environ.get("DB_NAME", "finans_db") # Supabase'de genelde 'postgres'
 DB_USER = os.environ.get("DB_USER", "postgres")
-DB_PASS = os.environ.get("DB_PASS", "sifreniz") # Lütfen kendi şifrenizi girin!
-
+DB_PASS = os.environ.get("DB_PASS", "sifreniz") # Şifre yerine, secrets'ı kontrol edin!
 
 # --- 1. Veritabanı Bağlantısı ---
 def get_db_connection():
-    """PostgreSQL veritabanı bağlantısını kurar."""
+    """PostgreSQL veritabanı bağlantısını kurar. Supabase için SSL zorunludur."""
     try:
+        # Supabase gibi bulut sağlayıcılar için SSLmode zorunlu olmalıdır.
         conn = psycopg2.connect(
             host=DB_HOST,
             database=DB_NAME,
             user=DB_USER,
-            password=DB_PASS
+            password=DB_PASS,
+            sslmode='require'  # KRİTİK GÜNCELLEME: Güvenli bulut bağlantısı için!
         )
         return conn
     except Exception as e:
-        st.error(f"⚠️ Veritabanı Bağlantı Hatası: Ayarlarınızı kontrol edin. Detay: {e}")
+        # Hatanın nerede olduğunu net görebilmek için DB_HOST değerini gösterelim
+        st.error(f"⚠️ Veritabanı Bağlantı Hatası: Host: {DB_HOST}. Detay: {e}")
         return None
 
-# --- 2. Tablo Oluşturma (Genellikle sadece ilk kurulumda kullanılır) ---
+# --- 2. Tablo Oluşturma (Genellikle manuel yapılır) ---
 def create_tables():
     """Gerekli 'users' ve 'user_data' tablolarını oluşturur."""
     conn = get_db_connection()
-    if conn is None: return False, "Veritabanı bağlantısı yok."
+    if conn is None: return False, "Veritabanı bağlantısı kurulamadı."
 
     try:
         with conn.cursor() as cur:
-            # users tablosu: Kullanıcı adı ve şifre hash'i
+            # users tablosu: Kimlik doğrulama
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     id SERIAL PRIMARY KEY,
@@ -47,7 +51,7 @@ def create_tables():
                     hashed_password VARCHAR(255) NOT NULL
                 );
             """)
-            # user_data tablosu: Kullanıcıya ait tüm simülasyon verileri (JSONB formatında)
+            # user_data tablosu: Simülasyon verileri
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS user_data (
                     username VARCHAR(100) REFERENCES users(username) ON DELETE CASCADE,
@@ -68,6 +72,7 @@ def register_user(username, password):
     conn = get_db_connection()
     if conn is None: return False, "Veritabanı bağlantısı yok."
     
+    # Şifre hashleme
     hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
     
     try:
@@ -118,15 +123,14 @@ def save_user_data(username, session_data):
     conn = get_db_connection()
     if conn is None: return False
     
-    # Kaydedilecek veriyi temizleme: Streamlit'e ait ve hassas bilgileri hariç tutarız.
+    # Kaydedilecek veriyi temizleme (hassas ve geçici verileri çıkarırız)
     data_to_save = {k: v for k, v in session_data.items() if not k.startswith("st.") and k not in ['password', 'username', 'logged_in', 'user_id']}
     
-    # Pandas DataFrame'leri JSON'a dönüştürme (gerekirse)
+    # Pandas DataFrame'leri JSON'a dönüştürme
     for key, value in data_to_save.items():
         if isinstance(value, pd.DataFrame):
             data_to_save[key] = value.to_json(orient='split')
         elif isinstance(value, set):
-            # Set'leri JSON'a dönüştürmek için listeye çevir
             data_to_save[key] = list(value)
     
     data_json = json.dumps(data_to_save)
@@ -166,9 +170,10 @@ def load_user_data(username):
                 loaded_data = json.loads(result[0])
                 
                 # JSON'dan yüklenen veriyi tekrar DataFrame ve Set'e dönüştürme
-                if 'harcama_kalemleri_df' in loaded_data:
+                # (Sadece ilgili anahtarları kontrol ediyoruz)
+                if 'harcama_kalemleri_df' in loaded_data and isinstance(loaded_data['harcama_kalemleri_df'], str):
                     loaded_data['harcama_kalemleri_df'] = pd.read_json(loaded_data['harcama_kalemleri_df'], orient='split')
-                if 'tek_seferlik_gelir_isaretleyicisi' in loaded_data:
+                if 'tek_seferlik_gelir_isaretleyicisi' in loaded_data and isinstance(loaded_data['tek_seferlik_gelir_isaretleyicisi'], list):
                     loaded_data['tek_seferlik_gelir_isaretleyicisi'] = set(loaded_data['tek_seferlik_gelir_isaretleyicisi'])
 
                 return loaded_data
